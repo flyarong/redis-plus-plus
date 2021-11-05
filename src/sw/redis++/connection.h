@@ -75,6 +75,10 @@ public:
 
     tls::TlsOptions tls;
 
+    // `readonly` is only used for reading from a slave node in Redis Cluster mode.
+    // Client code should never manually set/get it. This member might be removed in the future.
+    bool readonly = false;
+
 private:
     ConnectionOptions _parse_uri(const std::string &uri) const;
 
@@ -100,12 +104,6 @@ private:
     void _set_tcp_opts(const std::string &path, ConnectionOptions &opts) const;
 
     void _set_unix_opts(const std::string &path, ConnectionOptions &opts) const;
-
-    // `readonly` is only used for reading from a slave node in Redis Cluster mode.
-    friend class ShardsPool;
-    friend class Connection;
-
-    bool readonly = false;
 };
 
 class CmdArgs;
@@ -139,6 +137,11 @@ public:
 
     void reconnect();
 
+    auto create_time() const
+        -> std::chrono::time_point<std::chrono::steady_clock> {
+        return _create_time;
+    }
+
     auto last_active() const
         -> std::chrono::time_point<std::chrono::steady_clock> {
         return _last_active;
@@ -151,7 +154,7 @@ public:
 
     void send(CmdArgs &args);
 
-    ReplyUPtr recv();
+    ReplyUPtr recv(bool handle_error_reply = true);
 
     const ConnectionOptions& options() const {
         return _opts;
@@ -184,8 +187,11 @@ private:
 
     ContextUPtr _ctx;
 
+    // The time that the connection is created.
+    std::chrono::time_point<std::chrono::steady_clock> _create_time{};
+
     // The time that the connection is created or the time that
-    // the connection is used, i.e. *context()* is called.
+    // the connection is recently used, i.e. `_context()` is called.
     std::chrono::time_point<std::chrono::steady_clock> _last_active{};
 
     ConnectionOptions _opts;

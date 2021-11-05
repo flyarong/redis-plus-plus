@@ -14,60 +14,60 @@
    limitations under the License.
  *************************************************************************/
 
-#ifndef SEWENEW_REDISPLUSPLUS_ASYNC_REDIS_H
-#define SEWENEW_REDISPLUSPLUS_ASYNC_REDIS_H
+#ifndef SEWENEW_REDISPLUSPLUS_ASYNC_REDIS_CLUSTER_H
+#define SEWENEW_REDISPLUSPLUS_ASYNC_REDIS_CLUSTER_H
 
+#include <cassert>
+#include "utils.h"
 #include "async_connection.h"
 #include "async_connection_pool.h"
-#include "async_sentinel.h"
+#include "async_shards_pool.h"
 #include "event_loop.h"
-#include "utils.h"
-#include "command.h"
-#include "command_args.h"
-#include "command_options.h"
 #include "cmd_formatter.h"
 
 namespace sw {
 
 namespace redis {
 
-class AsyncRedis {
+class AsyncRedisCluster {
 public:
-    AsyncRedis(const ConnectionOptions &opts,
+    AsyncRedisCluster(const ConnectionOptions &opts,
             const ConnectionPoolOptions &pool_opts = {},
+            Role role = Role::MASTER,
             const EventLoopSPtr &loop = nullptr);
 
-    AsyncRedis(const std::shared_ptr<AsyncSentinel> &sentinel,
-                const std::string &master_name,
-                Role role,
-                const ConnectionOptions &connection_opts,
-                const ConnectionPoolOptions &pool_opts = {},
-                const EventLoopSPtr &loop = nullptr);
+    AsyncRedisCluster(const AsyncRedisCluster &) = delete;
+    AsyncRedisCluster& operator=(const AsyncRedisCluster &) = delete;
 
-    AsyncRedis(const AsyncRedis &) = delete;
-    AsyncRedis& operator=(const AsyncRedis &) = delete;
+    AsyncRedisCluster(AsyncRedisCluster &&) = default;
+    AsyncRedisCluster& operator=(AsyncRedisCluster &&) = default;
 
-    AsyncRedis(AsyncRedis &&) = default;
-    AsyncRedis& operator=(AsyncRedis &&) = default;
-
-    ~AsyncRedis() = default;
+    ~AsyncRedisCluster() = default;
 
     template <typename Result, typename ...Args>
-    Future<Result> command(const StringView &cmd_name, Args &&...args) {
-        auto formatter = [](const StringView &cmd_name, Args &&...args) {
+    Future<Result> command(const StringView &cmd_name, const StringView &key, Args &&...args) {
+        auto formatter = [&cmd_name](const StringView &key, Args &&...args) {
             CmdArgs cmd_args;
-            cmd_args.append(cmd_name, std::forward<Args>(args)...);
+            cmd_args.append(cmd_name, key, std::forward<Args>(args)...);
             return fmt::format_cmd(cmd_args);
         };
 
-        return _command<Result>(formatter, cmd_name, std::forward<Args>(args)...);
+        return _command<Result>(formatter, key, std::forward<Args>(args)...);
     }
 
     template <typename Result, typename Input>
     auto command(Input first, Input last)
         -> typename std::enable_if<IsIter<Input>::value, Future<Result>>::type {
-        auto formatter = [](Input first, Input last) {
+        if (first == last || std::next(first) == last) {
+            throw Error("command: invalid range");
+        }
+
+        const auto &cmd_name = *first;
+        ++first;
+
+        auto formatter = [&cmd_name](Input first, Input last) {
             CmdArgs cmd_args;
+            cmd_args.append(cmd_name);
             while (first != last) {
                 cmd_args.append(*first);
                 ++first;
@@ -79,21 +79,6 @@ public:
     }
 
     // CONNECTION commands.
-
-    Future<std::string> echo(const StringView &msg) {
-        return _command<std::string>(fmt::echo, msg);
-    }
-
-    Future<std::string> ping() {
-        return _command<std::string, FormattedCommand (*)()>(fmt::ping);
-    }
-
-    Future<std::string> ping(const StringView &msg) {
-        return _command<std::string,
-               FormattedCommand (*)(const StringView &)>(fmt::ping, msg);
-    }
-
-    // KEY commands.
 
     Future<long long> del(const StringView &key) {
         return _command<long long>(fmt::del, key);
@@ -237,7 +222,8 @@ public:
                 const StringView &val,
                 const std::chrono::milliseconds &ttl = std::chrono::milliseconds(0),
                 UpdateType type = UpdateType::ALWAYS) {
-        return _command_with_parser<bool, fmt::SetResultParser>(fmt::set, key, val, ttl, type);
+        return _command_with_parser<bool, fmt::SetResultParser>(fmt::set,
+                key, key, val, ttl, type);
     }
 
     Future<long long> strlen(const StringView &key) {
@@ -483,8 +469,7 @@ public:
     }
 
     Future<OptionalString> spop(const StringView &key) {
-        return _command<OptionalString,
-               FormattedCommand (*)(const StringView &)>(fmt::spop, key);
+        return _command<OptionalString, FormattedCommand (*)(const StringView &)>(fmt::spop, key);
     }
 
     template <typename Output>
@@ -577,12 +562,7 @@ public:
                     bool changed = false) {
         range_check("ZADD", first, last);
 
-        return _command<long long>(fmt::zadd_range<Input>,
-                key,
-                first,
-                last,
-                type,
-                changed);
+        return _command<long long>(fmt::zadd_range<Input>, key, first, last, type, changed);
     }
 
     template <typename T>
@@ -613,7 +593,7 @@ public:
 
     Future<Optional<std::pair<std::string, double>>> zpopmax(const StringView &key) {
         return _command<Optional<std::pair<std::string, double>>,
-                FormattedCommand (*)(const StringView &)>(fmt::zpopmax, key);
+               FormattedCommand (*)(const StringView &)>(fmt::zpopmax, key);
     }
 
     template <typename Output>
@@ -624,7 +604,7 @@ public:
 
     Future<Optional<std::pair<std::string, double>>> zpopmin(const StringView &key) {
         return _command<Optional<std::pair<std::string, double>>,
-                FormattedCommand (*)(const StringView &)>(fmt::zpopmin, key);
+               FormattedCommand (*)(const StringView &)>(fmt::zpopmin, key);
     }
 
     template <typename Output>
@@ -642,8 +622,7 @@ public:
     Future<Output> zrangebylex(const StringView &key,
                         const Interval &interval,
                         const LimitOptions &opts) {
-        return _command<Output>(fmt::zrangebylex<Interval>,
-                key, interval, opts);
+        return _command<Output>(fmt::zrangebylex<Interval>, key, interval, opts);
     }
 
     template <typename Output, typename Interval>
@@ -651,7 +630,6 @@ public:
         return zrangebylex<Output>(key, interval, {});
     }
 
-    // TODO: withscores parameter
     template <typename Output, typename Interval>
     Future<Output> zrangebyscore(const StringView &key,
                         const Interval &interval,
@@ -703,8 +681,7 @@ public:
     Future<Output> zrevrangebylex(const StringView &key,
                         const Interval &interval,
                         const LimitOptions &opts) {
-        return _command<Output>(fmt::zrevrangebylex<Interval>,
-                key, interval, opts);
+        return _command<Output>(fmt::zrevrangebylex<Interval>, key, interval, opts);
     }
 
     template <typename Output, typename Interval>
@@ -728,8 +705,13 @@ public:
                 Keys keys_last,
                 Args args_first,
                 Args args_last) {
-        return _command<Result>(fmt::eval<Keys, Args>,
-                script, keys_first, keys_last, args_first, args_last);
+        if (keys_first == keys_last) {
+            throw Error("DO NOT support Lua script without key");
+        }
+
+        return _generic_command<Result>(fmt::eval<Keys, Args>, *keys_first, script,
+                keys_first, keys_last,
+                args_first, args_last);
     }
 
     template <typename Result>
@@ -747,8 +729,12 @@ public:
                     Keys keys_last,
                     Args args_first,
                     Args args_last) {
-        return _command<Result>(fmt::evalsha<Keys, Args>,
-                script, keys_first, keys_last, args_first, args_last);
+        if (keys_first == keys_last) {
+            throw Error("DO NOT support Lua script without key");
+        }
+
+        return _generic_command<Result>(fmt::evalsha<Keys, Args>, *keys_first, script,
+                keys_first, keys_last, args_first, args_last);
     }
 
     template <typename Result>
@@ -761,29 +747,73 @@ public:
     }
 
 private:
-    template <typename Result, typename Formatter, typename ...Args>
-    Future<Result> _command(Formatter formatter, Args &&...args) {
-        return _command_with_parser<Result, DefaultResultParser<Result>>(
-                formatter, std::forward<Args>(args)...);
-    }
-
-    template <typename Result, typename ResultParser, typename Formatter, typename ...Args>
-    Future<Result> _command_with_parser(Formatter formatter, Args &&...args) {
+    template <typename Result, typename ResultParser,
+             typename Formatter, typename ...Args>
+    Future<Result> _command_with_parser(Formatter formatter,
+            const StringView &key, Args &&...args) {
         auto formatted_cmd = formatter(std::forward<Args>(args)...);
 
         assert(_pool);
-        SafeAsyncConnection connection(*_pool);
 
-        return connection.connection().send<Result, ResultParser>(std::move(formatted_cmd));
+        auto pool = _pool->fetch(key);
+        assert(pool);
+
+        GuardedAsyncConnection connection(pool);
+
+        return connection.connection().send<Result, ResultParser>(
+                _pool, key, std::move(formatted_cmd));
+    }
+
+    template <typename Result, typename Formatter, typename ...Args>
+    Future<Result> _generic_command(Formatter formatter, const StringView &key, Args &&...args) {
+        return _command_with_parser<Result, DefaultResultParser<Result>>(
+                formatter, key, std::forward<Args>(args)...);
+    }
+
+    template <typename Result, typename Formatter, typename Key, typename ...Args>
+    Future<Result> _command(Formatter formatter, Key &&key, Args &&...args) {
+        return _generic_command<Result>(formatter,
+                std::is_convertible<typename std::decay<Key>::type, StringView>(),
+                std::forward<Key>(key),
+                std::forward<Args>(args)...);
+    }
+
+    template <typename Result, typename Formatter, typename ...Args>
+    Future<Result> _generic_command(Formatter formatter, std::true_type,
+            const StringView &key, Args &&...args) {
+        return _generic_command<Result>(formatter, key, key, std::forward<Args>(args)...);
+    }
+
+    template <typename Result, typename Formatter, typename Input, typename ...Args>
+    Future<Result> _generic_command(Formatter formatter, std::false_type, Input &&input, Args &&...args) {
+        return _range_command<Result>(formatter,
+                std::is_convertible<typename std::decay<
+                    decltype(*std::declval<Input>())>::type, StringView>(),
+                std::forward<Input>(input),
+                std::forward<Args>(args)...);
+    }
+
+    template <typename Result, typename Formatter, typename Input, typename ...Args>
+    Future<Result> _range_command(Formatter formatter, std::true_type,
+            Input &&input, Args &&...args) {
+        return _generic_command<Result>(formatter, *input,
+                std::forward<Input>(input), std::forward<Args>(args)...);
+    }
+
+    template <typename Result, typename Formatter, typename Input, typename ...Args>
+    Future<Result> _range_command(Formatter formatter, std::false_type,
+            Input &&input, Args &&...args) {
+        return _generic_command<Result>(formatter, std::get<0>(*input),
+                std::forward<Input>(input), std::forward<Args>(args)...);
     }
 
     EventLoopSPtr _loop;
 
-    AsyncConnectionPoolSPtr _pool;
+    AsyncShardsPoolSPtr _pool;
 };
 
 }
 
 }
 
-#endif // end SEWENEW_REDISPLUSPLUS_ASYNC_REDIS_H
+#endif // end SEWENEW_REDISPLUSPLUS_ASYNC_REDIS_CLUSTER_H

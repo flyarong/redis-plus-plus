@@ -1,5 +1,5 @@
 /**************************************************************************
-   Copyright (c) 2017 sewenew
+   Copyright (c) 2021 sewenew
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -14,20 +14,22 @@
    limitations under the License.
  *************************************************************************/
 
-#include "pipeline.h"
+#include "async_redis_cluster.h"
+#include <cassert>
 
 namespace sw {
 
 namespace redis {
 
-std::vector<ReplyUPtr> PipelineImpl::exec(Connection &connection, std::size_t cmd_num) {
-    std::vector<ReplyUPtr> replies;
-    while (cmd_num > 0) {
-        replies.push_back(connection.recv(false));
-        --cmd_num;
+AsyncRedisCluster::AsyncRedisCluster(const ConnectionOptions &opts,
+        const ConnectionPoolOptions &pool_opts,
+        Role role,
+        const EventLoopSPtr &loop) : _loop(loop) {
+    if (!_loop) {
+        _loop = std::make_shared<EventLoop>();
     }
 
-    return replies;
+    _pool = std::make_shared<AsyncShardsPool>(_loop, pool_opts, opts, role);
 }
 
 }

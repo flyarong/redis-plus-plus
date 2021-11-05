@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.1)
 
-set(REDIS_PLUS_PLUS_VERSION "1.2.3")
+set(REDIS_PLUS_PLUS_VERSION "1.3.2")
 message(STATUS "redis-plus-plus version: ${REDIS_PLUS_PLUS_VERSION}")
 
 project(redis++ LANGUAGES CXX VERSION ${REDIS_PLUS_PLUS_VERSION})
@@ -12,7 +12,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 message(STATUS "redis-plus-plus build type: ${CMAKE_BUILD_TYPE}")
 
-set(REDIS_PLUS_PLUS_DEFAULT_CXX_STANDARD 11)
+set(REDIS_PLUS_PLUS_DEFAULT_CXX_STANDARD 17)
 if(NOT REDIS_PLUS_PLUS_CXX_STANDARD)
     set(REDIS_PLUS_PLUS_CXX_STANDARD ${REDIS_PLUS_PLUS_DEFAULT_CXX_STANDARD} CACHE STRING "Set CXX standard" FORCE)
     set_property(CACHE REDIS_PLUS_PLUS_CXX_STANDARD PROPERTY STRINGS "11" "14" "17" "20")
@@ -21,6 +21,8 @@ message(STATUS "redis-plus-plus build with CXX standard: c++${REDIS_PLUS_PLUS_CX
 
 if(NOT WIN32)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++${REDIS_PLUS_PLUS_CXX_STANDARD}")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /std:c++${REDIS_PLUS_PLUS_CXX_STANDARD}")
 endif()
 
 if(REDIS_PLUS_PLUS_BUILD_ASYNC)
@@ -61,7 +63,30 @@ if(REDIS_PLUS_PLUS_BUILD_ASYNC)
         "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_connection_pool.cpp"
         "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_redis.cpp"
         "${REDIS_PLUS_PLUS_SOURCE_DIR}/event_loop.cpp"
+        "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_sentinel.cpp"
+        "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_redis_cluster.cpp"
+        "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_shards_pool.cpp"
     )
+
+    if(NOT REDIS_PLUS_PLUS_ASYNC_FUTURE)
+        set(REDIS_PLUS_PLUS_ASYNC_FUTURE "std")
+    endif()
+
+    if(REDIS_PLUS_PLUS_ASYNC_FUTURE STREQUAL "std")
+        set(REDIS_PLUS_PLUS_ASYNC_FUTURE_HEADER "${REDIS_PLUS_PLUS_SOURCE_DIR}/future/std")
+    elseif(REDIS_PLUS_PLUS_ASYNC_FUTURE STREQUAL "boost")
+        set(REDIS_PLUS_PLUS_ASYNC_FUTURE_HEADER "${REDIS_PLUS_PLUS_SOURCE_DIR}/future/boost")
+        find_package(Boost REQUIRED COMPONENTS system thread)
+    else()
+        message(FATAL_ERROR "invalid REDIS_PLUS_PLUS_ASYNC_FUTURE")
+    endif()
+endif()
+
+# cxx utils
+if(REDIS_PLUS_PLUS_CXX_STANDARD LESS 17)
+    set(CXX_UTILS_DIR "${REDIS_PLUS_PLUS_SOURCE_DIR}/cxx11")
+else()
+    set(CXX_UTILS_DIR "${REDIS_PLUS_PLUS_SOURCE_DIR}/cxx17")
 endif()
 
 # TLS support
@@ -108,12 +133,14 @@ if(REDIS_PLUS_PLUS_BUILD_STATIC)
     set(STATIC_LIB redis++_static)
 
     add_library(${STATIC_LIB} STATIC ${REDIS_PLUS_PLUS_SOURCES})
+    add_library(redis++::${STATIC_LIB} ALIAS ${STATIC_LIB})
 
     list(APPEND REDIS_PLUS_PLUS_TARGETS ${STATIC_LIB})
 
     target_include_directories(${STATIC_LIB} PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${REDIS_PLUS_PLUS_SOURCE_DIR}>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${TLS_SUB_DIR}>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${CXX_UTILS_DIR}>
             $<INSTALL_INTERFACE:include>)
 
     if(hiredis_FOUND)
@@ -123,7 +150,11 @@ if(REDIS_PLUS_PLUS_BUILD_STATIC)
     endif()
 
     if(REDIS_PLUS_PLUS_BUILD_ASYNC)
+        target_include_directories(${STATIC_LIB} PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${REDIS_PLUS_PLUS_ASYNC_FUTURE_HEADER}>)
         target_include_directories(${STATIC_LIB} PUBLIC $<BUILD_INTERFACE:${REDIS_PLUS_PLUS_ASYNC_LIB_HEADER}>)
+        if(REDIS_PLUS_PLUS_ASYNC_FUTURE STREQUAL "boost")
+            target_include_directories(${STATIC_LIB} SYSTEM PUBLIC $<BUILD_INTERFACE:${Boost_INCLUDE_DIR}>)
+        endif()
     endif()
 
     if (WIN32)
@@ -154,12 +185,14 @@ if(REDIS_PLUS_PLUS_BUILD_SHARED)
     set(SHARED_LIB redis++)
 
     add_library(${SHARED_LIB} SHARED ${REDIS_PLUS_PLUS_SOURCES})
-
+    add_library(redis++::${SHARED_LIB} ALIAS ${SHARED_LIB})
+    
     list(APPEND REDIS_PLUS_PLUS_TARGETS ${SHARED_LIB})
 
     target_include_directories(${SHARED_LIB} PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${REDIS_PLUS_PLUS_SOURCE_DIR}>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${TLS_SUB_DIR}>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${CXX_UTILS_DIR}>
             $<INSTALL_INTERFACE:include>)
 
     if(hiredis_FOUND)
@@ -170,8 +203,12 @@ if(REDIS_PLUS_PLUS_BUILD_SHARED)
     endif()
 
     if(REDIS_PLUS_PLUS_BUILD_ASYNC)
+        target_include_directories(${SHARED_LIB} PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/${REDIS_PLUS_PLUS_ASYNC_FUTURE_HEADER}>)
         target_include_directories(${SHARED_LIB} PUBLIC $<BUILD_INTERFACE:${REDIS_PLUS_PLUS_ASYNC_LIB_HEADER}>)
         target_link_libraries(${SHARED_LIB} PUBLIC ${REDIS_PLUS_PLUS_ASYNC_LIB})
+        if(REDIS_PLUS_PLUS_ASYNC_FUTURE STREQUAL "boost")
+            target_include_directories(${SHARED_LIB} SYSTEM PUBLIC $<BUILD_INTERFACE:${Boost_INCLUDE_DIR}>)
+        endif()
     endif()
 
     if(WIN32)
@@ -212,7 +249,7 @@ install(EXPORT redis++-targets
 
 # Install headers.
 set(HEADER_PATH "sw/redis++")
-file(GLOB HEADERS "${REDIS_PLUS_PLUS_SOURCE_DIR}/*.h*" "${TLS_SUB_DIR}/*.h")
+file(GLOB HEADERS "${REDIS_PLUS_PLUS_SOURCE_DIR}/*.h*" "${TLS_SUB_DIR}/*.h" "${CXX_UTILS_DIR}/*.h" "${REDIS_PLUS_PLUS_ASYNC_FUTURE_HEADER}/*.h")
 if(NOT REDIS_PLUS_PLUS_BUILD_ASYNC)
     file(GLOB ASYNC_HEADERS "${REDIS_PLUS_PLUS_SOURCE_DIR}/async_*.h" "${REDIS_PLUS_PLUS_SOURCE_DIR}/event_*.h")
     list(REMOVE_ITEM HEADERS ${ASYNC_HEADERS})

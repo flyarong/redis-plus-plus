@@ -1,5 +1,5 @@
 /**************************************************************************
-   Copyright (c) 2017 sewenew
+   Copyright (c) 2021 sewenew
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -14,22 +14,26 @@
    limitations under the License.
  *************************************************************************/
 
-#include "pipeline.h"
+#ifndef SEWENEW_REDISPLUSPLUS_ASYNC_UTILS_H
+#define SEWENEW_REDISPLUSPLUS_ASYNC_UTILS_H
+
+#define BOOST_THREAD_PROVIDES_FUTURE
+#define BOOST_THREAD_PROVIDES_FUTURE_CONTINUATION
+
+#include <boost/thread/future.hpp>
 
 namespace sw {
 
 namespace redis {
 
-std::vector<ReplyUPtr> PipelineImpl::exec(Connection &connection, std::size_t cmd_num) {
-    std::vector<ReplyUPtr> replies;
-    while (cmd_num > 0) {
-        replies.push_back(connection.recv(false));
-        --cmd_num;
-    }
+template <typename T>
+using Future = boost::future<T>;
 
-    return replies;
-}
+template <typename T>
+using Promise = boost::promise<T>;
 
 }
 
 }
+
+#endif // end SEWENEW_REDISPLUSPLUS_ASYNC_UTILS_H

@@ -1,5 +1,5 @@
 /**************************************************************************
-   Copyright (c) 2017 sewenew
+   Copyright (c) 2021 sewenew
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -14,22 +14,33 @@
    limitations under the License.
  *************************************************************************/
 
-#include "pipeline.h"
+#ifndef SEWENEW_REDISPLUSPLUS_CXX_UTILS_H
+#define SEWENEW_REDISPLUSPLUS_CXX_UTILS_H
+
+#include <string_view>
+#include <optional>
+#include <variant>
+
+#define REDIS_PLUS_PLUS_HAS_OPTIONAL
+
+#define REDIS_PLUS_PLUS_HAS_VARIANT
 
 namespace sw {
 
 namespace redis {
 
-std::vector<ReplyUPtr> PipelineImpl::exec(Connection &connection, std::size_t cmd_num) {
-    std::vector<ReplyUPtr> replies;
-    while (cmd_num > 0) {
-        replies.push_back(connection.recv(false));
-        --cmd_num;
-    }
+using StringView = std::string_view;
 
-    return replies;
-}
+template <typename T>
+using Optional = std::optional<T>;
 
-}
+template <typename ...Args>
+using Variant = std::variant<Args...>;
+
+using Monostate = std::monostate;
 
 }
+
+}
+
+#endif // end SEWENEW_REDISPLUSPLUS_CXX_UTILS_H

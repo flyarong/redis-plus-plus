@@ -17,6 +17,8 @@
 #include "async_connection.h"
 #include <hiredis/async.h>
 #include "errors.h"
+#include "async_shards_pool.h"
+#include "cmd_formatter.h"
 
 namespace {
 
@@ -60,51 +62,61 @@ namespace sw {
 
 namespace redis {
 
-FormattedCommand::FormattedCommand(char *data, int len) : _data(data), _size(len) {
-    if (data == nullptr || len < 0) {
-        throw Error("failed to format command");
-    }
-}
-
-FormattedCommand::~FormattedCommand() noexcept {
-    if (_data != nullptr) {
-        redisFreeCommand(_data);
-    }
-}
-
-void FormattedCommand::_move(FormattedCommand &&that) noexcept {
-    _data = that._data;
-    _size = that._size;
-    that._data = nullptr;
-    that._size = 0;
-}
-
-AsyncConnection::AsyncConnection(const ConnectionOptions &opts, EventLoop *loop) :
+AsyncConnection::AsyncConnection(const ConnectionOptions &opts,
+        EventLoop *loop,
+        AsyncConnectionMode mode) :
     _opts(opts),
     _loop(loop),
-    _state(State::BROKEN) {
+    _create_time(std::chrono::steady_clock::now()),
+    _last_active(std::chrono::steady_clock::now().time_since_epoch()) {
     assert(_loop != nullptr);
+
+    switch (mode) {
+    case AsyncConnectionMode::SINGLE:
+        _state = State::NOT_CONNECTED;
+        break;
+
+    case AsyncConnectionMode::SENTINEL:
+        _state = State::WAIT_SENTINEL;
+        break;
+
+    default:
+        throw Error("not supporeted async connection mode");
+        break;
+    }
 }
 
 AsyncConnection::~AsyncConnection() {
-    auto events = _get_events();
+    _clean_up();
+}
 
-    // TODO: assert(events.empty());
+void AsyncConnection::send(AsyncEventUPtr event) {
+    {
+        std::lock_guard<std::mutex> lock(_mtx);
 
-    auto err = std::make_exception_ptr(Error("connection is closing"));
-    for (auto &event : events) {
-        event->set_exception(err);
+        _events.push_back(std::move(event));
     }
+
+    _loop->add(shared_from_this());
 }
 
 void AsyncConnection::event_callback() {
-    switch (_state) {
-    case State::BROKEN:
+    // NOTE: we should try our best not throw in these callbacks
+    switch (_state.load()) {
+    case State::WAIT_SENTINEL:
+        _connect_with_sentinel();
+        break;
+
+    case State::NOT_CONNECTED:
         _connect();
         break;
 
     case State::READY:
         _send();
+        break;
+
+    case State::BROKEN:
+        _clean_up();
         break;
 
     default:
@@ -122,7 +134,7 @@ void AsyncConnection::connect_callback(std::exception_ptr err) {
 
     // Connect OK.
     try {
-        switch (_state) {
+        switch (_state.load()) {
         case State::CONNECTING:
             _connecting_callback();
             break;
@@ -142,19 +154,30 @@ void AsyncConnection::connect_callback(std::exception_ptr err) {
 }
 
 void AsyncConnection::disconnect(std::exception_ptr err) {
-    if (_ctx == nullptr) {
-        return;
+    if (_ctx != nullptr) {
+        _disable_disconnect_callback();
+
+        redisAsyncDisconnect(_ctx);
     }
-
-    _disable_disconnect_callback();
-
-    redisAsyncDisconnect(_ctx);
 
     _fail_events(err);
 }
 
 void AsyncConnection::disconnect_callback(std::exception_ptr err) {
     _fail_events(err);
+}
+
+ConnectionOptions AsyncConnection::options() {
+    std::lock_guard<std::mutex> lock(_mtx);
+
+    return _opts;
+}
+
+void AsyncConnection::update_node_info(const std::string &host, int port) {
+    std::lock_guard<std::mutex> lock(_mtx);
+
+    _opts.host = host;
+    _opts.port = port;
 }
 
 void AsyncConnection::_disable_disconnect_callback() {
@@ -203,21 +226,28 @@ std::vector<AsyncEventUPtr> AsyncConnection::_get_events() {
     return events;
 }
 
-void AsyncConnection::_fail_events(std::exception_ptr err) {
-    _ctx = nullptr;
-
-    if (!err) {
-        err = std::make_exception_ptr(Error("connection is closing"));
+void AsyncConnection::_clean_up() {
+    if (!_err) {
+        _err = std::make_exception_ptr(Error("connection is closing"));
     }
 
     auto events = _get_events();
     for (auto &event : events) {
         assert(event);
 
-        event->set_exception(err);
+        event->set_exception(_err);
     }
+}
+
+void AsyncConnection::_fail_events(std::exception_ptr err) {
+    _ctx = nullptr;
+
+    _err = err;
 
     _state = State::BROKEN;
+
+    // Must call _clean_up after `_err` has been set.
+    _clean_up();
 }
 
 void AsyncConnection::_connecting_callback() {
@@ -276,19 +306,45 @@ void AsyncConnection::_set_ready() {
     _send();
 }
 
+void AsyncConnection::_connect_with_sentinel() {
+    try {
+        auto opts = options();
+        if (opts.host.empty()) {
+            // Still waiting for sentinel.
+            return;
+        }
+
+        // Already got node info from sentinel
+        _state = State::NOT_CONNECTED;
+
+        _connect();
+    } catch (const Error &err) {
+        _fail_events(std::current_exception());
+    }
+}
+
 void AsyncConnection::_connect() {
     try {
-        auto ctx = _connect(_opts);
+        auto opts = options();
+
+        auto ctx = _connect(opts);
 
         assert(ctx && ctx->err == REDIS_OK);
 
+        const auto &tls_opts = opts.tls;
+        tls::TlsContextUPtr tls_ctx;
+        if (tls::enabled(tls_opts)) {
+            tls_ctx = tls::secure_connection(ctx->c, tls_opts);
+        }
+
         _loop->watch(*ctx);
 
+        _tls_ctx = std::move(tls_ctx);
         _ctx = ctx.release();
 
         _state = State::CONNECTING;
     } catch (const Error &err) {
-        _fail_events(std::make_exception_ptr(err));
+        _fail_events(std::current_exception());
     }
 }
 
@@ -312,7 +368,7 @@ AsyncConnection::AsyncContextUPtr AsyncConnection::_connect(const ConnectionOpti
     redisAsyncContext *context = nullptr;
     switch (opts.type) {
     case ConnectionType::TCP:
-        context = redisAsyncConnect(opts.host.c_str(), _opts.port);
+        context = redisAsyncConnect(opts.host.c_str(), opts.port);
         break;
 
     case ConnectionType::UNIX:
@@ -337,6 +393,24 @@ AsyncConnection::AsyncContextUPtr AsyncConnection::_connect(const ConnectionOpti
     ctx->dataCleanup = _clean_async_context;
 
     return ctx;
+}
+
+GuardedAsyncConnection::GuardedAsyncConnection(const AsyncConnectionPoolSPtr &pool) :
+    _pool(pool), _connection(_pool->fetch()) {
+    assert(!_connection->broken());
+}
+
+GuardedAsyncConnection::~GuardedAsyncConnection() {
+    // If `GuardedAsyncConnection` has been moved, `_pool` will be nullptr.
+    if (_pool) {
+        _pool->release(std::move(_connection));
+    }
+}
+
+AsyncConnection& GuardedAsyncConnection::connection() {
+    assert(_connection);
+
+    return *_connection;
 }
 
 }

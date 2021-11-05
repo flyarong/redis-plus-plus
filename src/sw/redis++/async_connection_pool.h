@@ -18,30 +18,66 @@
 #define SEWENEW_REDISPLUSPLUS_ASYNC_CONNECTION_POOL_H
 
 #include <cassert>
+#include <unordered_set>
 #include <chrono>
 #include <mutex>
 #include <memory>
+#include <exception>
 #include <condition_variable>
 #include <deque>
 #include "connection.h"
 #include "connection_pool.h"
 #include "async_connection.h"
+#include "async_sentinel.h"
 
 namespace sw {
 
 namespace redis {
 
-class AsyncConnectionPool {
+class AsyncConnectionPool;
+
+class SimpleAsyncSentinel {
+public:
+    SimpleAsyncSentinel(const AsyncSentinelSPtr &sentinel,
+                        const std::string &master_name,
+                        Role role);
+
+    SimpleAsyncSentinel() = default;
+
+    SimpleAsyncSentinel(const SimpleAsyncSentinel &) = default;
+    SimpleAsyncSentinel& operator=(const SimpleAsyncSentinel &) = default;
+
+    SimpleAsyncSentinel(SimpleAsyncSentinel &&) = default;
+    SimpleAsyncSentinel& operator=(SimpleAsyncSentinel &&) = default;
+
+    ~SimpleAsyncSentinel() = default;
+
+    explicit operator bool() const {
+        return bool(_sentinel);
+    }
+
+    AsyncConnectionSPtr create(const ConnectionOptions &opts,
+            const std::shared_ptr<AsyncConnectionPool> &pool,
+            EventLoop *loop);
+
+private:
+    AsyncSentinelSPtr _sentinel;
+
+    std::string _master_name;
+
+    Role _role = Role::MASTER;
+};
+
+class AsyncConnectionPool : public std::enable_shared_from_this<AsyncConnectionPool> {
 public:
     AsyncConnectionPool(const EventLoopSPtr &loop,
                     const ConnectionPoolOptions &pool_opts,
                     const ConnectionOptions &connection_opts);
 
-    //AsyncConnectionPool(SimpleSentinel sentinel,
-    //                const ConnectionPoolOptions &pool_opts,
-    //                const ConnectionOptions &connection_opts);
-
-    AsyncConnectionPool() = default;
+    AsyncConnectionPool(SimpleAsyncSentinel sentinel,
+                    const EventLoopSPtr &loop,
+                    const ConnectionPoolOptions &pool_opts,
+                    const ConnectionOptions &connection_opts);
 
     AsyncConnectionPool(AsyncConnectionPool &&that);
     AsyncConnectionPool& operator=(AsyncConnectionPool &&that);
@@ -63,31 +99,34 @@ public:
 
     AsyncConnectionPool clone();
 
+    // These update_node_info overloads are called by AsyncSentinel.
+    void update_node_info(const std::string &host,
+            int port,
+            AsyncConnectionSPtr &connection);
+
+    void update_node_info(AsyncConnectionSPtr &connection,
+            std::exception_ptr err);
+
 private:
     void _move(AsyncConnectionPool &&that);
 
     // NOT thread-safe
     AsyncConnectionSPtr _create();
 
-    //Connection _create(SimpleSentinel &sentinel, const ConnectionOptions &opts, bool locked);
-
     AsyncConnectionSPtr _fetch();
 
     void _wait_for_connection(std::unique_lock<std::mutex> &lock);
 
     bool _need_reconnect(const AsyncConnection &connection,
-                            const std::chrono::milliseconds &connection_lifetime) const;
+                            const std::chrono::milliseconds &connection_lifetime,
+                            const std::chrono::milliseconds &connection_idle_time) const;
 
-    /*
     void _update_connection_opts(const std::string &host, int port) {
         _opts.host = host;
         _opts.port = port;
     }
 
-    bool _role_changed(const ConnectionOptions &opts) const {
-        return opts.port != _opts.port || opts.host != _opts.host;
-    }
-    */
+    bool _role_changed(const ConnectionOptions &opts) const;
 
     EventLoopSPtr _loop;
 
@@ -103,7 +142,7 @@ private:
 
     std::condition_variable _cv;
 
-    //SimpleSentinel _sentinel;
+    SimpleAsyncSentinel _sentinel;
 };
 
 using AsyncConnectionPoolSPtr = std::shared_ptr<AsyncConnectionPool>;
@@ -125,6 +164,8 @@ public:
     }
 
     AsyncConnection& connection() {
+        assert(_connection);
+
         return *_connection;
     }
 
@@ -132,39 +173,6 @@ private:
     AsyncConnectionPool &_pool;
     AsyncConnectionSPtr _connection;
 };
-
-// NOTE: This class is similar to `SafeAsyncConnection`.
-// The difference is that `SafeAsyncConnection` tries to avoid copying a std::shared_ptr.
-class GuardedAsyncConnection {
-public:
-    explicit GuardedAsyncConnection(const AsyncConnectionPoolSPtr &pool) : _pool(pool),
-                                                        _connection(_pool->fetch()) {
-        assert(!_connection->broken());
-    }
-
-    GuardedAsyncConnection(const GuardedAsyncConnection &) = delete;
-    GuardedAsyncConnection& operator=(const GuardedAsyncConnection &) = delete;
-
-    GuardedAsyncConnection(GuardedAsyncConnection &&) = default;
-    GuardedAsyncConnection& operator=(GuardedAsyncConnection &&) = default;
-
-    ~GuardedAsyncConnection() {
-        // If `GuardedAsyncConnection` has been moved, `_pool` will be nullptr.
-        if (_pool) {
-            _pool->release(std::move(_connection));
-        }
-    }
-
-    AsyncConnectionSPtr& connection() {
-        return _connection;
-    }
-
-private:
-    AsyncConnectionPoolSPtr _pool;
-    AsyncConnectionSPtr _connection;
-};
-
-using GuardedAsyncConnectionSPtr = std::shared_ptr<GuardedAsyncConnection>;
 
 }
 
